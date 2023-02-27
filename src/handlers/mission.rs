@@ -17,10 +17,14 @@ type DbConnection = Arc<Mutex<AsyncPgConnection>>;
 pub(crate) fn register() -> Router {
     Router::new()
         .route("/missions", get(get_missions))
+        .route("/mission", post(add_mission))
         .route("/mission/:mission_id", get(get_mission))
         .route("/mission/:mission_id", delete(delete_mission))
-        .route("/mission", post(add_mission))
-}
+        
+        .route("/mission/name/:mission_id", get(get_mission_by_name))
+        .route("/mission/name/:mission_id", delete(delete_mission_by_name))
+}        
+
 
 #[derive(Queryable, Serialize, Clone, Debug)]
 struct Mission {
@@ -63,6 +67,25 @@ async fn delete_mission(
     StatusCode::OK
 }
 
+async fn delete_mission_by_name(
+    Path(url_mission_name): Path<String>,
+    Extension(db): Extension<DbConnection>,
+) -> StatusCode {
+    use crate::schema::missions::dsl::*;
+
+    let mut db = db.lock().await;
+
+    if let Err(e) = diesel::delete(missions.filter(mission_name.eq(url_mission_name)))
+        .execute(db.deref_mut())
+        .await
+    {
+        dbg!(e);
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    StatusCode::OK
+}
+
 async fn get_mission(
     Path(url_mission_ids): Path<i32>,
     Extension(db): Extension<DbConnection>,
@@ -73,6 +96,26 @@ async fn get_mission(
 
     let results: Vec<_> = missions
         .filter(mission_id.eq(url_mission_ids))
+        .limit(1)
+        .load::<Mission>(db.deref_mut())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(mission) = results.last() {
+        return Ok(Json(mission.clone()));
+    }
+    Err(StatusCode::NOT_FOUND)
+}
+async fn get_mission_by_name(
+    Path(url_mission_name): Path<String>,
+    Extension(db): Extension<DbConnection>,
+) -> Result<Json<Mission>, StatusCode> {
+    use crate::schema::missions::dsl::*;
+
+    let mut db = db.lock().await;
+
+    let results: Vec<_> = missions
+        .filter(mission_name.eq(url_mission_name))
         .limit(1)
         .load::<Mission>(db.deref_mut())
         .await
