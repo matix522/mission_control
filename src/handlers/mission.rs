@@ -1,8 +1,10 @@
-use std::{ops::DerefMut, sync::Arc};
+use diesel_async::pg::AsyncPgConnection;
+use diesel_async::pooled_connection::bb8::Pool;
+use std::ops::DerefMut;
 
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use tokio::sync::Mutex;
+use diesel_async::RunQueryDsl;
 
+use crate::utils;
 use axum::{
     extract::Path,
     http::StatusCode,
@@ -12,7 +14,7 @@ use axum::{
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
-type DbConnection = Arc<Mutex<AsyncPgConnection>>;
+type DbConnectionPool = Pool<AsyncPgConnection>;
 
 pub(crate) fn register() -> Router {
     Router::new()
@@ -20,11 +22,9 @@ pub(crate) fn register() -> Router {
         .route("/mission", post(add_mission))
         .route("/mission/:mission_id", get(get_mission))
         .route("/mission/:mission_id", delete(delete_mission))
-        
         .route("/mission/name/:mission_id", get(get_mission_by_name))
         .route("/mission/name/:mission_id", delete(delete_mission_by_name))
-}        
-
+}
 
 #[derive(Queryable, Serialize, Clone, Debug)]
 struct Mission {
@@ -50,49 +50,56 @@ struct NewMission {
 
 async fn delete_mission(
     Path(url_mission_ids): Path<i32>,
-    Extension(db): Extension<DbConnection>,
-) -> StatusCode {
+    Extension(db_pool): Extension<DbConnectionPool>,
+) -> Result<(), StatusCode> {
     use crate::schema::missions::dsl::*;
 
-    let mut db = db.lock().await;
+    let mut db = utils::get_db_connection(&db_pool).await?;
+    if let Err(e) = diesel::delete(missions.filter(mission_id.eq(url_mission_ids)))
+        .execute(db.deref_mut())
+        .await
+    {
+        dbg!(e);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     if let Err(e) = diesel::delete(missions.filter(mission_id.eq(url_mission_ids)))
         .execute(db.deref_mut())
         .await
     {
         dbg!(e);
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    StatusCode::OK
+    Err(StatusCode::OK)
 }
 
 async fn delete_mission_by_name(
     Path(url_mission_name): Path<String>,
-    Extension(db): Extension<DbConnection>,
-) -> StatusCode {
+    Extension(db_pool): Extension<DbConnectionPool>,
+) -> Result<(), StatusCode> {
     use crate::schema::missions::dsl::*;
 
-    let mut db = db.lock().await;
+    let mut db = utils::get_db_connection(&db_pool).await?;
 
     if let Err(e) = diesel::delete(missions.filter(mission_name.eq(url_mission_name)))
         .execute(db.deref_mut())
         .await
     {
         dbg!(e);
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    StatusCode::OK
+    Ok(())
 }
 
 async fn get_mission(
     Path(url_mission_ids): Path<i32>,
-    Extension(db): Extension<DbConnection>,
+    Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<Json<Mission>, StatusCode> {
     use crate::schema::missions::dsl::*;
 
-    let mut db = db.lock().await;
+    let mut db = utils::get_db_connection(&db_pool).await?;
 
     let results: Vec<_> = missions
         .filter(mission_id.eq(url_mission_ids))
@@ -108,11 +115,12 @@ async fn get_mission(
 }
 async fn get_mission_by_name(
     Path(url_mission_name): Path<String>,
-    Extension(db): Extension<DbConnection>,
+    Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<Json<Mission>, StatusCode> {
     use crate::schema::missions::dsl::*;
+    let a: DbConnectionPool;
 
-    let mut db = db.lock().await;
+    let mut db = utils::get_db_connection(&db_pool).await?;
 
     let results: Vec<_> = missions
         .filter(mission_name.eq(url_mission_name))
@@ -128,11 +136,14 @@ async fn get_mission_by_name(
 }
 
 async fn add_mission(
-    Extension(db): Extension<DbConnection>,
+    Extension(db_pool): Extension<DbConnectionPool>,
     Json(add_mission): Json<AddMission>,
 ) -> (StatusCode, Json<Option<i32>>) {
     use crate::schema::missions::dsl::*;
-    let mut db = db.lock().await;
+    let mut db = match utils::get_db_connection(&db_pool).await {
+        Ok(db) => db,
+        Err(e) => return (e, Json(None)),
+    };
 
     let new_mission = NewMission {
         mission_name: add_mission.mission_name,
@@ -151,11 +162,11 @@ async fn add_mission(
 }
 
 async fn get_missions(
-    Extension(db): Extension<DbConnection>,
+    Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<Json<Vec<Mission>>, StatusCode> {
     tracing::debug!("Get missions request");
     use crate::schema::missions::dsl::*;
-    let mut db = db.lock().await;
+    let mut db = utils::get_db_connection(&db_pool).await?;
 
     let results = missions
         .load::<Mission>(db.deref_mut())
