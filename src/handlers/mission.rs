@@ -48,51 +48,40 @@ struct NewMission {
     location: String,
     tags: Vec<String>,
 }
-type MissionMatcher<'a> = Box<dyn BoxableExpression<crate::schema::missions::table, DB, SqlType = Bool> + 'a>;
+type MissionMatcher<'a> =
+    Box<dyn BoxableExpression<crate::schema::missions::table, DB, SqlType = Bool> + 'a>;
 
 enum MatchMission<'a> {
     ById(i32),
-    ByName(&'a str)
+    ByName(&'a str),
 }
 
-impl <'a> MatchMission<'a> {
+impl<'a> MatchMission<'a> {
     fn make_expresion(&'a self) -> MissionMatcher<'a> {
+        use crate::schema::missions::dsl::*;
+
         match self {
-            MatchMission::ById(id) => by_id(*id),
-            MatchMission::ByName(name) => by_name(name)
+            MatchMission::ById(id) => Box::new(mission_id.eq(id)),
+            MatchMission::ByName(name) => Box::new(mission_name.eq(name)),
         }
     }
-}
-
-
-fn by_name<'a>(name: &'a str) -> MissionMatcher<'a>
-{
-    use crate::schema::missions::dsl::*;
-
-    Box::new(mission_name.eq(name))
-}
-fn by_id<'a>(id : i32) -> MissionMatcher<'a>
-{
-    use crate::schema::missions::dsl::*;
-
-    Box::new(mission_id.eq(id))
 }
 
 async fn delete_mission_by_id(
     Path(url_mission_ids): Path<i32>,
     Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<(), StatusCode> {
-    delete_mission_by_predicate( MatchMission::ById(url_mission_ids), db_pool).await
+    delete_mission_by_predicate(MatchMission::ById(url_mission_ids), db_pool).await
 }
 async fn delete_mission_by_name(
     Path(url_mission_name): Path<String>,
     Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<(), StatusCode> {
-    delete_mission_by_predicate( MatchMission::ByName(&url_mission_name), db_pool).await
+    delete_mission_by_predicate(MatchMission::ByName(&url_mission_name), db_pool).await
 }
 
 async fn delete_mission_by_predicate(
-    predicate : MatchMission<'_>,
+    predicate: MatchMission<'_>,
     db_pool: DbConnectionPool,
 ) -> Result<(), StatusCode> {
     use crate::schema::missions::dsl::*;
@@ -110,7 +99,7 @@ async fn delete_mission_by_predicate(
 }
 
 async fn get_mission_by_predicate(
-    predicate : MatchMission<'_>,
+    predicate: MatchMission<'_>,
     db_pool: DbConnectionPool,
 ) -> Result<Json<Mission>, StatusCode> {
     use crate::schema::missions::dsl::*;
@@ -134,15 +123,13 @@ async fn get_mission_by_id(
     Path(url_mission_ids): Path<i32>,
     Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<Json<Mission>, StatusCode> {
-    get_mission_by_predicate( MatchMission::ById(url_mission_ids), db_pool).await
-
+    get_mission_by_predicate(MatchMission::ById(url_mission_ids), db_pool).await
 }
 async fn get_mission_by_name(
     Path(url_mission_name): Path<String>,
     Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<Json<Mission>, StatusCode> {
-    get_mission_by_predicate( MatchMission::ByName(&url_mission_name), db_pool).await
-
+    get_mission_by_predicate(MatchMission::ByName(&url_mission_name), db_pool).await
 }
 
 async fn add_mission(
