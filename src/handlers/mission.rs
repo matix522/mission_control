@@ -11,17 +11,18 @@ use axum::{
     routing::{delete, get, post},
     Extension, Json, Router,
 };
-use diesel::prelude::*;
+use diesel::{prelude::*, sql_types::Bool};
 use serde::{Deserialize, Serialize};
 
 type DbConnectionPool = Pool<AsyncPgConnection>;
+type DB = diesel::pg::Pg;
 
 pub(crate) fn register() -> Router {
     Router::new()
         .route("/missions", get(get_missions))
         .route("/mission", post(add_mission))
-        .route("/mission/:mission_id", get(get_mission))
-        .route("/mission/:mission_id", delete(delete_mission))
+        .route("/mission/:mission_id", get(get_mission_by_id))
+        .route("/mission/:mission_id", delete(delete_mission_by_id))
         .route("/mission/name/:mission_id", get(get_mission_by_name))
         .route("/mission/name/:mission_id", delete(delete_mission_by_name))
 }
@@ -47,23 +48,57 @@ struct NewMission {
     location: String,
     tags: Vec<String>,
 }
+type MissionMatcher<'a> = Box<dyn BoxableExpression<crate::schema::missions::table, DB, SqlType = Bool> + 'a>;
 
-async fn delete_mission(
+enum MatchMission<'a> {
+    ById(i32),
+    ByName(&'a str)
+}
+
+impl <'a> MatchMission<'a> {
+    fn make_expresion(&'a self) -> MissionMatcher<'a> {
+        match self {
+            MatchMission::ById(id) => by_id(*id),
+            MatchMission::ByName(name) => by_name(name)
+        }
+    }
+}
+
+
+fn by_name<'a>(name: &'a str) -> MissionMatcher<'a>
+{
+    use crate::schema::missions::dsl::*;
+
+    Box::new(mission_name.eq(name))
+}
+fn by_id<'a>(id : i32) -> MissionMatcher<'a>
+{
+    use crate::schema::missions::dsl::*;
+
+    Box::new(mission_id.eq(id))
+}
+
+async fn delete_mission_by_id(
     Path(url_mission_ids): Path<i32>,
     Extension(db_pool): Extension<DbConnectionPool>,
+) -> Result<(), StatusCode> {
+    delete_mission_by_predicate( MatchMission::ById(url_mission_ids), db_pool).await
+}
+async fn delete_mission_by_name(
+    Path(url_mission_name): Path<String>,
+    Extension(db_pool): Extension<DbConnectionPool>,
+) -> Result<(), StatusCode> {
+    delete_mission_by_predicate( MatchMission::ByName(&url_mission_name), db_pool).await
+}
+
+async fn delete_mission_by_predicate(
+    predicate : MatchMission<'_>,
+    db_pool: DbConnectionPool,
 ) -> Result<(), StatusCode> {
     use crate::schema::missions::dsl::*;
 
     let mut db = utils::get_db_connection(&db_pool).await?;
-    if let Err(e) = diesel::delete(missions.filter(mission_id.eq(url_mission_ids)))
-        .execute(db.deref_mut())
-        .await
-    {
-        dbg!(e);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    if let Err(e) = diesel::delete(missions.filter(mission_id.eq(url_mission_ids)))
+    if let Err(e) = diesel::delete(missions.filter(predicate.make_expresion()))
         .execute(db.deref_mut())
         .await
     {
@@ -74,35 +109,16 @@ async fn delete_mission(
     Err(StatusCode::OK)
 }
 
-async fn delete_mission_by_name(
-    Path(url_mission_name): Path<String>,
-    Extension(db_pool): Extension<DbConnectionPool>,
-) -> Result<(), StatusCode> {
-    use crate::schema::missions::dsl::*;
-
-    let mut db = utils::get_db_connection(&db_pool).await?;
-
-    if let Err(e) = diesel::delete(missions.filter(mission_name.eq(url_mission_name)))
-        .execute(db.deref_mut())
-        .await
-    {
-        dbg!(e);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    Ok(())
-}
-
-async fn get_mission(
-    Path(url_mission_ids): Path<i32>,
-    Extension(db_pool): Extension<DbConnectionPool>,
+async fn get_mission_by_predicate(
+    predicate : MatchMission<'_>,
+    db_pool: DbConnectionPool,
 ) -> Result<Json<Mission>, StatusCode> {
     use crate::schema::missions::dsl::*;
 
     let mut db = utils::get_db_connection(&db_pool).await?;
 
     let results: Vec<_> = missions
-        .filter(mission_id.eq(url_mission_ids))
+        .filter(predicate.make_expresion())
         .limit(1)
         .load::<Mission>(db.deref_mut())
         .await
@@ -112,27 +128,21 @@ async fn get_mission(
         return Ok(Json(mission.clone()));
     }
     Err(StatusCode::NOT_FOUND)
+}
+
+async fn get_mission_by_id(
+    Path(url_mission_ids): Path<i32>,
+    Extension(db_pool): Extension<DbConnectionPool>,
+) -> Result<Json<Mission>, StatusCode> {
+    get_mission_by_predicate( MatchMission::ById(url_mission_ids), db_pool).await
+
 }
 async fn get_mission_by_name(
     Path(url_mission_name): Path<String>,
     Extension(db_pool): Extension<DbConnectionPool>,
 ) -> Result<Json<Mission>, StatusCode> {
-    use crate::schema::missions::dsl::*;
-    let a: DbConnectionPool;
+    get_mission_by_predicate( MatchMission::ByName(&url_mission_name), db_pool).await
 
-    let mut db = utils::get_db_connection(&db_pool).await?;
-
-    let results: Vec<_> = missions
-        .filter(mission_name.eq(url_mission_name))
-        .limit(1)
-        .load::<Mission>(db.deref_mut())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(mission) = results.last() {
-        return Ok(Json(mission.clone()));
-    }
-    Err(StatusCode::NOT_FOUND)
 }
 
 async fn add_mission(
